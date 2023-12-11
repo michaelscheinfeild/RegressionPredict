@@ -8,6 +8,10 @@ from datetime import timedelta
 import numpy as np
 import mplcursors
 from pprint import pprint
+import copy
+
+# https://www.kaggle.com/code/alexisbcook/n-step-lookahead
+# https://www.geeksforgeeks.org/job-sequencing-problem/
 
 MIN_TIME = 5.0
 MAX_TIME = 12.0
@@ -301,6 +305,172 @@ def getScheduleRoomsAndDocDepth1(rooms,dfbig):
 
     return   total_cost,schedule,doctor,cost
 
+# set busy to false if completed shift
+def resetBusyByTime(anesthetists,surgery):
+
+            for anesthetist_id, anesthetist in anesthetists.items():
+                if anesthetist['shift_end']<=surgery.start:
+                        anesthetist['busy']=False
+
+            return    anesthetists
+
+# find all anesthetists time below min
+def findDoctorMinTime(anesthetists):
+
+                selected_cur_pool_min = []
+                for anesthetist_id, anesthetist in anesthetists.items():
+                            if anesthetist['duration'] < MIN_TIME:
+                                selected_cur_pool_min.append(anesthetist_id)
+
+                return selected_cur_pool_min
+
+# schedule  surgery : room and doctor: , we look 2 forward if we can use current or new doctor
+def getScheduleRoomsAndDocDepth2(rooms,dfbig):
+    schedule = []
+    doctor   = []
+    cost     =  [] # cost sum added
+    cost_row     =  [] # cost curent surgery
+
+    anesthetists ={}
+
+    id = 0
+    total_cost = 0
+    for idx, (surgery, next_surgery) in enumerate(zip(dfbig.itertuples(), dfbig.iloc[1:].itertuples()), start=1):
+
+        #if surgery['Unnamed: 0']==47:
+        #  print("Column 'Unnamed: 0' is present.")
+
+        for room_id, room in rooms.items():
+
+            #free room
+            if(room['available']==False):
+                if(room['intervals_end'] <= surgery.intervals_start):
+                    room['available'] = True
+                    room['intervals_end'] = 0.0
+
+            else:
+                schedule.append(room_id)
+                room['available'] = False
+                room['intervals_end'] = surgery.intervals_end
+
+                #find if we have free doctor +less price else we add new one
+                cur_id=0
+                selected_id=-1
+                if len(anesthetists) == 0:
+                    # Adding a new anesthetist
+                    new_anesthetist_id = id  # Assuming you want the ID to be 0 for the new anesthetist
+                    new_anesthetist_key = f'anesthetist-{new_anesthetist_id}'
+
+                    cur_id = id
+                    duration = surgery.duration
+                    cost_cur = calculate_cost(duration)
+
+                    #new
+                    anesthetists[new_anesthetist_key] = {
+                        'shift_start': surgery.start,
+                        'shift_end': surgery.end,
+                        'busy': True,
+                        'duration':surgery.duration,
+                        'cost': cost_cur}
+
+                else:
+                    #1 reset doctor states not busy if tome over
+                    anesthetists = resetBusyByTime(anesthetists,surgery)
+
+                    next_anesthetist = copy.deepcopy(anesthetists)
+                    next_anesthetist = resetBusyByTime(next_anesthetist,next_surgery)
+
+
+                    duration = surgery.duration
+                    cost_cur = calculate_cost(duration)
+
+                    # find all doctors free below min hours
+                    selected_cur_pool_min =  findDoctorMinTime(anesthetists)
+                    selected_next_pool_min = findDoctorMinTime(next_anesthetist)
+
+
+                    # run over doctor and see if we have better cost to reuse
+                    selected_id = -1
+                    for anesthetist_id, anesthetist in anesthetists.items():
+                        if anesthetist['busy']==False:
+                           duration_anth  =  (surgery.end-anesthetist['shift_start']).total_seconds() / 3600
+
+                           #  NOT MORE THAN 12
+                           if(duration_anth > MAX_TIME):
+                               continue
+
+                           cost_anth      =  calculate_cost(duration_anth)
+
+                           # we must select to achive min time !
+                           if(anesthetist['duration']< MIN_TIME):
+                                    selected_id = anesthetist_id
+                                    cost_cur = cost_anth
+                                    cur_id = anesthetist_id
+                                    break
+
+                           # doctor is better or same than add new
+                           # if selected doctor first we remain with choice
+                           # DOCTOR SHOULD WORK AT LEAST 5 HOURS BUT
+                           if((selected_id==-1 and cost_anth<=cost_cur) or (cost_anth<cost_cur)) :
+                                       selected_id = anesthetist_id
+                                       cost_cur = cost_anth
+                                       cur_id = anesthetist_id
+
+
+                    #id=cur_id , found better solution than add new
+                    if(selected_id!=-1):
+                           start = anesthetists[selected_id]['shift_start']
+                           durationTotal  = (surgery.end - start).total_seconds() / 3600
+                           anesthetists[selected_id] = {
+                            'shift_start': start, #remain
+                            'shift_end': surgery.end,
+                            'busy': True,
+                            'duration':durationTotal,
+                            'cost':cost_cur}
+
+
+                    else:
+                      #add new doctor
+                      new_anesthetist_id =  len(anesthetists)
+                      cur_id = new_anesthetist_id
+                      new_anesthetist_key = f'anesthetist-{new_anesthetist_id}'
+                      duration = surgery.duration
+                      cost_cur = calculate_cost(duration)
+
+                      anesthetists[new_anesthetist_key] = {
+                            'shift_start': surgery.start, # new doctor
+                            'shift_end': surgery.end,
+                            'busy': True,
+                            'duration':surgery.duration,
+                            'cost':cost_cur
+                            }
+
+                if(selected_id!=-1):
+                    cost_cur -= anesthetists[selected_id]['cost'] # update to total cost
+
+
+                cost_row.append(cost_cur)
+                total_cost +=cost_cur #calculate_cost(duration)
+                cost.append(total_cost)
+
+                if(selected_id!=-1):
+                    doctor.append(selected_id)
+                else:
+                   #new doctor id
+                   doctor.append(f'anesthetist-{cur_id}')
+                break
+
+    pprint(anesthetists)
+    # Convert the dictionary to a DataFrame
+    anesthetists_df = pd.DataFrame.from_dict(anesthetists, orient='index')
+
+    # Write the DataFrame to a CSV file
+    anesthetists_df.to_csv('anesthetists_dataD1.csv', index_label='Anesthetist_ID')
+
+
+    return   total_cost,schedule,doctor,cost
+
+
 #plot rooms schedule
 def plot_schedule(rooms_plot_numeric, interval_start_end):
     fig, ax = plt.subplots()
@@ -424,6 +594,10 @@ dfbig['cost'] = cost
 #plot_patches(dfbig)
 print('simple cost',total_costSimple)
 
+#depth2
+#rooms = initrooms()
+#total_costSimple2,scheduleSimple2,doctorSimple2,cost2  = getScheduleRoomsAndDocDepth2(rooms,dfbig)
+
 #---------------
 # depth1
 #todo: add limit hours
@@ -450,6 +624,16 @@ new_df = new_df.drop('intervals_end', axis=1)
 new_df = new_df.drop('duration', axis=1)
 new_df = new_df.drop('cost', axis=1)
 plot_day_scheduleDay(new_df)
+
+# 	start_time	end_time	anesthetist_id	room_id
+
+dfsol = pd.DataFrame()
+dfsol['start_time']=dfbig['start']
+dfsol['end_time']=dfbig['end']
+dfsol['anesthetist_id']=dfbig['doctorSimple']
+dfsol['room_id']=dfbig['room']
+dfsol.to_csv('micschSol.csv', index=False)
+
 #===============
 interval_start_end = createIntervals(dfbig)
 
